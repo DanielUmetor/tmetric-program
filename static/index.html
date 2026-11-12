@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jira → TMetric</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Jira → TMetric</h1>
+    <div class="filters">
+      <div class="seg" id="range-seg">
+        <button data-range="today">Today</button>
+        <button data-range="week">This week</button>
+        <button data-range="month">This month</button>
+        <button data-range="custom">Custom</button>
+      </div>
+      <span id="custom-range" hidden>
+        <input type="date" id="range-from"> – <input type="date" id="range-to">
+      </span>
+      <div class="chips" id="status-chips">
+        <button data-status="open">Open</button>
+        <button data-status="progress">In progress</button>
+        <button data-status="pending">Pending / Review</button>
+        <button data-status="closed">Closed</button>
+      </div>
+      <select id="scope">
+        <option value="mine">My tickets</option>
+        <option value="all">Everyone in sprint</option>
+      </select>
+      <label class="target">Daily target <input type="number" id="target" min="1" max="24" step="0.5"> h</label>
+      <button id="refresh" class="secondary">↻ Refresh</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="banner" class="banner" hidden></div>
+
+    <section class="kpis">
+      <div class="card kpi" id="kpi-active"></div>
+      <div class="card kpi" id="kpi-today"></div>
+      <div class="card kpi" id="kpi-period"></div>
+      <div class="card kpi" id="kpi-urgent"></div>
+    </section>
+
+    <section class="layout">
+      <aside class="card tracker">
+        <h2>Time tracker</h2>
+        <label>Ticket <select id="tr-ticket"></select></label>
+        <div class="live" id="live">00:00:00</div>
+        <p class="muted center" id="live-sub">No timer running</p>
+        <button id="tr-toggle" class="big">▶ Start timer</button>
+        <p class="muted small center">Timers start from now. For past work, add an entry with From → To.</p>
+        <button id="tr-manual" class="secondary full">+ Add time entry</button>
+      </aside>
+
+      <section class="card table-card">
+        <div class="card-head">
+          <h2>Tickets</h2>
+          <input id="search" type="search" placeholder="Search tickets…">
+        </div>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th data-sort="key">Ticket</th>
+                <th data-sort="summary">Title</th>
+                <th data-sort="priority">Priority</th>
+                <th data-sort="status">Status</th>
+                <th data-sort="time" class="num" id="th-time">Time</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="tbody"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <p id="empty" class="muted" hidden>No tickets match the current filters.</p>
+      </section>
+
+      <aside class="card chart-card">
+        <div class="card-head">
+          <h2>Time breakdown</h2>
+          <div class="seg small" id="chart-seg">
+            <button data-mode="ticket">Ticket</button>
+            <button data-mode="project">Project</button>
+          </div>
+        </div>
+        <div id="chart"></div>
+      </aside>
+    </section>
+
+    <section class="card entries-card">
+      <div class="card-head">
+        <h2>Time entries <small class="muted" id="entries-label"></small></h2>
+        <button id="add-entry" class="secondary">+ Add entry</button>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th><th>From – To</th><th class="num">Duration</th>
+              <th>Description</th><th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="entries-body"></tbody>
+        </table>
+      </div>
+      <p id="entries-empty" class="muted" hidden>No time entries in this range.</p>
+    </section>
+  </main>
+
+  <dialog id="time-dialog">
+    <form id="time-form">
+      <h2 id="td-title"></h2>
+      <p id="td-ticket" class="muted"></p>
+
+      <label>Ticket (optional) <select id="td-ticket-sel"></select></label>
+      <label>Description
+        <input type="text" id="td-note" required maxlength="200" placeholder="What did you work on?">
+      </label>
+      <label>Date <input type="date" id="td-date" required></label>
+
+      <div class="tabs" id="td-tabs">
+        <button type="button" class="tab active" data-field="start">
+          <small id="td-start-label">From</small><b id="td-start-val"></b>
+        </button>
+        <button type="button" class="tab" data-field="end" id="td-tab-end">
+          <small>To</small><b id="td-end-val"></b>
+        </button>
+      </div>
+
+      <svg id="clock" viewBox="0 0 200 200"></svg>
+
+      <div class="ampm">
+        <button type="button" data-ap="AM">AM</button>
+        <button type="button" data-ap="PM">PM</button>
+      </div>
+      <div class="digital" id="td-digital"></div>
+      <p class="warn" id="td-warn"></p>
+      <p class="muted center" id="td-duration"></p>
+
+      <div class="actions">
+        <button type="button" class="secondary" id="td-cancel">Cancel</button>
+        <button type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" role="status"></div>
+  <script src="/clock.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
