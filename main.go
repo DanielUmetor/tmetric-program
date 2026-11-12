@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -21,37 +19,6 @@ type Entry struct {
 	Start   string  `json:"start"`
 	End     *string `json:"end"`
 	Running bool    `json:"running"`
-}
-
-// spanReq is a finished time entry: a note plus date and From/To times.
-type spanReq struct {
-	Note  string `json:"note"`
-	Date  string `json:"date"`  // 2026-11-10
-	Start string `json:"start"` // 09:00
-	End   string `json:"end"`   // 11:30
-}
-
-func (in spanReq) parse() (note string, s, e time.Time, err error) {
-	note = strings.TrimSpace(in.Note)
-	if note == "" {
-		err = fmt.Errorf("description is required")
-		return
-	}
-	if s, err = parseLocal(in.Date + " " + in.Start); err != nil {
-		return
-	}
-	if e, err = parseLocal(in.Date + " " + in.End); err != nil {
-		return
-	}
-	if !e.After(s) {
-		err = fmt.Errorf("end must be after start")
-		return
-	}
-	if e.After(time.Now()) {
-		err = fmt.Errorf("end time is in the future")
-		return
-	}
-	return
 }
 
 type statusWriter struct {
@@ -145,14 +112,29 @@ func main() {
 		writeJSON(w, out)
 	})
 
-	// Start a timer from now. (Past time is logged as a From/To entry instead.)
+	// Start a timer. Optional ?start=2026-11-10T09:00 to backdate.
 	mux.HandleFunc("POST /start/{key}", func(w http.ResponseWriter, r *http.Request) {
 		note := r.PathValue("key") + " " + r.URL.Query().Get("title")
+
+		start := ""
+		if s := r.URL.Query().Get("start"); s != "" {
+			t, err := parseLocal(s)
+			if err != nil {
+				fail(w, http.StatusBadRequest, err)
+				return
+			}
+			if t.After(time.Now()) {
+				fail(w, http.StatusBadRequest, fmt.Errorf("start time is in the future"))
+				return
+			}
+			start = t.Format(timeLayout)
+		}
+
 		if _, err := stopAll(acc); err != nil {
 			fail(w, http.StatusBadGateway, err)
 			return
 		}
-		e, err := startTimer(acc, note, "")
+		e, err := startTimer(acc, note, start)
 		if err != nil {
 			fail(w, http.StatusBadGateway, err)
 			return
@@ -170,18 +152,38 @@ func main() {
 		writeJSON(w, map[string]int{"stopped": n})
 	})
 
-	// Add a finished entry (manual entry or past work).
+	// Log finished time in the past.
 	mux.HandleFunc("POST /log", func(w http.ResponseWriter, r *http.Request) {
-		var in spanReq
+		var in struct {
+			Key   string `json:"key"`
+			Title string `json:"title"`
+			Date  string `json:"date"`  // 2026-11-10
+			Start string `json:"start"` // 09:00
+			End   string `json:"end"`   // 11:30
+		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			fail(w, http.StatusBadRequest, err)
 			return
 		}
-		note, s, e, err := in.parse()
+		s, err := parseLocal(in.Date + " " + in.Start)
 		if err != nil {
 			fail(w, http.StatusBadRequest, err)
 			return
 		}
+		e, err := parseLocal(in.Date + " " + in.End)
+		if err != nil {
+			fail(w, http.StatusBadRequest, err)
+			return
+		}
+		if !e.After(s) {
+			fail(w, http.StatusBadRequest, fmt.Errorf("end must be after start"))
+			return
+		}
+		if e.After(time.Now()) {
+			fail(w, http.StatusBadRequest, fmt.Errorf("end time is in the future"))
+			return
+		}
+		note := in.Key + " " + in.Title
 		entry, err := logEntry(acc, note, s.Format(timeLayout), e.Format(timeLayout))
 		if err != nil {
 			fail(w, http.StatusBadGateway, err)
@@ -189,46 +191,6 @@ func main() {
 		}
 		slog.Info("time logged", "note", note, "start", s, "end", e, "dur", e.Sub(s))
 		writeJSON(w, entry)
-	})
-
-	// Edit a finished entry (new note and/or From/To).
-	mux.HandleFunc("PUT /entries/{id}", func(w http.ResponseWriter, r *http.Request) {
-		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-		if err != nil {
-			fail(w, http.StatusBadRequest, fmt.Errorf("bad entry id"))
-			return
-		}
-		var in spanReq
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-			fail(w, http.StatusBadRequest, err)
-			return
-		}
-		note, s, e, err := in.parse()
-		if err != nil {
-			fail(w, http.StatusBadRequest, err)
-			return
-		}
-		entry, err := updateEntry(acc, id, note, s.Format(timeLayout), e.Format(timeLayout))
-		if err != nil {
-			fail(w, http.StatusBadGateway, err)
-			return
-		}
-		slog.Info("entry updated", "id", id, "note", note, "start", s, "end", e)
-		writeJSON(w, entry)
-	})
-
-	mux.HandleFunc("DELETE /entries/{id}", func(w http.ResponseWriter, r *http.Request) {
-		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-		if err != nil {
-			fail(w, http.StatusBadRequest, fmt.Errorf("bad entry id"))
-			return
-		}
-		if err := deleteEntry(acc, id); err != nil {
-			fail(w, http.StatusBadGateway, err)
-			return
-		}
-		slog.Info("entry deleted", "id", id)
-		writeJSON(w, map[string]bool{"deleted": true})
 	})
 
 	slog.Info("listening", "url", "http://localhost:8080")
