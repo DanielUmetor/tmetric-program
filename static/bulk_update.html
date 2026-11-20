@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TMetric Bulk Update</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1d2330; --muted:#5d6675; --line:#d9dde4; --accent:#2f6fde; --bad:#c0392b; --ok:#1e8e4f; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14171c; --card:#1d2128; --ink:#e6e9ee; --muted:#9aa3b1; --line:#323843; --accent:#6b9bff; --bad:#ff7b6b; --ok:#5fd18f; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 20px; color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  label { display:block; font-weight:600; margin: 0 0 6px; }
+  .hint { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  input[type=password], input[type=number], input[type=text] { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); font:inherit; }
+  .row { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 600px) { .row { grid-template-columns: 1fr; } }
+  .buttons { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  button { padding: 8px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--ink); font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  pre { margin:0; white-space: pre-wrap; word-break: break-word; font: 13px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; max-height: 60vh; overflow:auto; }
+  #status { font-size: 13px; color: var(--muted); }
+  .note { font-size: 13px; color: var(--muted); }
+  /* Blue button style matching the main page (static/style.css `button`). */
+  .back { margin: 0 0 16px; }
+  .btn-blue, input[type=file]::file-selector-button {
+    display: inline-block; cursor: pointer; padding: 0.4rem 0.8rem; border: 1px solid #4c6ef5;
+    background: #4c6ef5; color: #fff; border-radius: 6px; font: 14px/1.45 system-ui, sans-serif;
+    text-decoration: none;
+  }
+  input[type=file]::file-selector-button { margin-right: 10px; }
+  .btn-blue:hover, input[type=file]::file-selector-button:hover { filter: brightness(1.08); }
+</style>
+</head>
+<body>
+<main>
+  <p class="back"><a class="btn-blue" href="/">← Back to main</a></p>
+  <h1>TMetric Bulk Update</h1>
+  <p class="sub">Pushes time entries from a workbook into TMetric. Everything runs in your own browser: your token and workbook never touch our server.</p>
+
+  <div class="card">
+    <div class="buttons">
+      <button id="template" disabled>Download blank template</button>
+      <span class="note">Fill in one row per time entry, then choose the file below.</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label for="file">Workbook (.xlsx)</label>
+        <input id="file" type="file" accept=".xlsx">
+        <div class="hint">Needs the <b>tmetrics_updated</b> sheet and the <b>Sheet1</b> client → project map.</div>
+      </div>
+      <div>
+        <label for="token">TMetric API token</label>
+        <input id="token" type="password" autocomplete="off" placeholder="Paste your token">
+        <div class="hint">TMetric → My Profile → API access. Kept in this tab only, never saved.</div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <div>
+        <label for="limit">Send at most</label>
+        <input id="limit" type="number" min="0" value="1">
+        <div class="hint">Start with 1 to test, then set 0 to send everything left.</div>
+      </div>
+      <div>
+        <label for="account">Account ID (optional)</label>
+        <input id="account" type="text" placeholder="Default: your active workspace">
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="buttons">
+      <button id="check" class="primary" disabled>Check (dry run)</button>
+      <button id="send" class="danger" disabled>Send to TMetric</button>
+      <span style="flex:1"></span>
+      <button id="exportLog">Export sent log</button>
+      <button id="clearLog">Clear sent log</button>
+    </div>
+    <p class="note">Rows already sent are remembered in this browser so re-running won't create duplicates. Clearing that log means the next send can duplicate entries.</p>
+    <div id="status">Loading Python…</div>
+  </div>
+
+  <div class="card"><pre id="out"></pre></div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const out = $("out");
+function print(s) { out.textContent += s + "\n"; out.scrollTop = out.scrollHeight; }
+window.tmPrint = print;
+
+const PY = String.raw`
+import datetime as dt, json, re
+import js
+from pyodide.http import pyfetch
+
+API = "https://app.tmetric.com/api/v3"
+DATA_SHEET = "tmetrics_updated"
+MAP_SHEET = "Sheet1"
+LOG_KEY = "tmetric_sent_log"
+
+CLIENTS = [
+    ("Roads AI", "Roads AI Pilot"),
+    ("KCDM", "King Cetshwayo DM _ ALSMA25/26"),
+    ("Internal Training", "Internal Training"),
+    ("Internal Project SW", "Internal Project - SW"),
+    ("COU", "City of Umhlathuze LM _ ALSMA25/26"),
+    ("Internal", "Internal Project - SW"),
+    ("STLM", "STLM_ AM Support 25/26 - BA05/10/2024"),
+    ("MCLM", "Mogale City LM _ ALSMA25/26"),
+    ("ELM", "Emfuleni LM _ ALSMA25/26"),
+]
+
+def make_template(rows=500):
+    """Blank workbook in the layout load_rows() reads: B-E dates/times, F message, G client."""
+    import io, openpyxl
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.worksheet.datavalidation import DataValidation
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = DATA_SHEET
+    heads = ["Start (auto)", "Start date", "Start time", "End date", "End time",
+             "Message", "Client Name", "Time spent (auto)"]
+    widths = [17, 12, 10, 12, 10, 40, 22, 16]
+    bold, fill = Font(bold=True), PatternFill("solid", fgColor="DDE6F5")
+    for i, (h, w) in enumerate(zip(heads, widths), start=1):
+        c = ws.cell(row=1, column=i, value=h)
+        c.font, c.fill = bold, fill
+        ws.column_dimensions[c.column_letter].width = w
+    ws.freeze_panes = "A2"
+    for r in range(2, rows + 2):
+        ws[f"A{r}"] = f'=IF(OR(B{r}="",C{r}=""),"",B{r}+C{r})'
+        ws[f"A{r}"].number_format = "yyyy-mm-dd hh:mm"
+        ws[f"H{r}"] = f'=IF(OR(B{r}="",C{r}="",D{r}="",E{r}=""),"",(D{r}+E{r})-(B{r}+C{r}))'
+        ws[f"H{r}"].number_format = "[h]:mm"
+        for col in "BD":
+            ws[f"{col}{r}"].number_format = "yyyy-mm-dd"
+        for col in "CE":
+            ws[f"{col}{r}"].number_format = "hh:mm"
+    dv = DataValidation(type="list", formula1=f"={MAP_SHEET}!$A$2:$A$100", allow_blank=True,
+                        showErrorMessage=True, errorTitle="Unknown client",
+                        error=f"Pick a client from the list, or add it to {MAP_SHEET} first.")
+    ws.add_data_validation(dv)
+    dv.add(f"G2:G{rows + 1}")
+
+    m = wb.create_sheet(MAP_SHEET)
+    m.append(["Client Name", "Project"])
+    for c in m[1]:
+        c.font, c.fill = bold, fill
+    for row in CLIENTS:
+        m.append(list(row))
+    m.column_dimensions["A"].width = 22
+    m.column_dimensions["B"].width = 42
+
+    h = wb.create_sheet("How to use")
+    for line in [
+        "One row per time entry on the tmetrics_updated sheet.",
+        "Start date / End date: e.g. 2026-11-20.  Start time / End time: e.g. 08:30.",
+        "Message becomes the note on the TMetric entry.",
+        "Client Name: pick from the dropdown. Each client maps to a TMetric project on Sheet1.",
+        "New client? Add it to Sheet1 with the project name exactly as it appears in TMetric.",
+        "Columns A and H fill themselves in and are ignored by the import.",
+    ]:
+        h.append([line])
+    h.column_dimensions["A"].width = 95
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+def say(s=""):
+    js.tmPrint(str(s))
+
+def norm(s):
+    s = re.sub(r"\s+", " ", str(s or "")).strip().lower()
+    return re.sub(r"\s*([_\[\]])\s*", r"\1", s)
+
+def as_date(v):
+    if isinstance(v, dt.datetime): return v.date()
+    if isinstance(v, dt.date): return v
+    return dt.datetime.strptime(str(v).strip()[:10], "%Y-%m-%d").date()
+
+def as_time(v):
+    if isinstance(v, dt.datetime): return v.time()
+    if isinstance(v, dt.time): return v
+    return dt.time.fromisoformat(str(v).strip())
+
+def load_rows(path):
+    import openpyxl
+    wb = openpyxl.load_workbook(path, data_only=True)
+    for name in (MAP_SHEET, DATA_SHEET):
+        if name not in wb.sheetnames:
+            raise ValueError(f"The workbook has no sheet called '{name}'.")
+    mapping = {}
+    for client, project in wb[MAP_SHEET].iter_rows(min_row=2, max_col=2, values_only=True):
+        if client and project:
+            mapping[norm(client)] = str(project).strip()
+    rows, problems = [], []
+    for i, r in enumerate(wb[DATA_SHEET].iter_rows(min_row=2, max_col=7, values_only=True), start=2):
+        r = tuple(r) + (None,) * (7 - len(r))
+        _, b, c, d, e, f, g = r[:7]
+        if not any([b, c, d, e, g]):
+            continue
+        try:
+            start = dt.datetime.combine(as_date(b), as_time(c))
+            end = dt.datetime.combine(as_date(d), as_time(e))
+        except Exception as ex:
+            problems.append(f"row {i}: bad date/time ({ex})"); continue
+        if end <= start:
+            problems.append(f"row {i}: end {end} is not after start {start}"); continue
+        project = mapping.get(norm(g))
+        if not project:
+            problems.append(f"row {i}: client '{g}' not found in {MAP_SHEET}"); continue
+        rows.append(dict(row=i, start=start, end=end, note=str(f or "").strip(), client=g, project=project))
+    rows.sort(key=lambda x: x["start"])
+    for a, b2 in zip(rows, rows[1:]):
+        if b2["start"] < a["end"]:
+            problems.append(f"rows {a['row']} & {b2['row']} overlap "
+                            f"({a['start']:%Y-%m-%d %H:%M} to {a['end']:%Y-%m-%d %H:%M} vs "
+                            f"{b2['start']:%Y-%m-%d %H:%M} to {b2['end']:%Y-%m-%d %H:%M})")
+    for r in rows:
+        if r["end"] - r["start"] > dt.timedelta(hours=14):
+            problems.append(f"row {r['row']}: {r['end'] - r['start']} long, check the dates in B/D")
+    return rows, problems
+
+class BlockedByBrowser(Exception):
+    pass
+
+class HttpError(Exception):
+    pass
+
+class TMetric:
+    def __init__(self, token):
+        self.headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    async def _call(self, method, url, body=None):
+        try:
+            resp = await pyfetch(url, method=method, headers=self.headers,
+                                 body=json.dumps(body) if body is not None else None)
+        except Exception as ex:
+            raise BlockedByBrowser(str(ex))
+        text = await resp.string()
+        if not resp.ok:
+            raise HttpError(f"{resp.status}: {text[:300]}")
+        return json.loads(text) if text else None
+
+    async def get(self, path, **params):
+        q = "&".join(f"{k}={v}" for k, v in params.items())
+        return await self._call("GET", API + path + (f"?{q}" if q else ""))
+
+    async def user(self):
+        return await self.get("/user")
+
+    async def projects(self, account_id):
+        for path in (f"/accounts/{account_id}/timeentries/projects", f"/accounts/{account_id}/projects"):
+            try:
+                return await self.get(path)
+            except HttpError:
+                continue
+        raise HttpError("Could not list projects from TMetric. Check the token and account.")
+
+    async def create(self, account_id, user_id, entry):
+        return await self._call("POST", f"{API}/accounts/{account_id}/timeentries?userId={user_id}", entry)
+
+def project_lookup(projects):
+    idx = {}
+    for p in projects:
+        name = p.get("name") or p.get("projectName") or ""
+        code = p.get("code") or p.get("projectCode") or ""
+        pid = p.get("id") or p.get("projectId")
+        idx[norm(name)] = (pid, name)
+        if code:
+            idx[norm(f"{name} [{code}]")] = (pid, name)
+    return idx
+
+def read_log():
+    try:
+        return set(json.loads(js.localStorage.getItem(LOG_KEY) or "[]"))
+    except Exception:
+        return set()
+
+def write_log(done):
+    try:
+        js.localStorage.setItem(LOG_KEY, json.dumps(sorted(done)))
+    except Exception:
+        say("  (warning: this browser would not save the sent log)")
+
+BLOCKED_MSG = """
+The browser blocked the call to TMetric before it got an answer.
+This is most likely TMetric not allowing requests from web pages on other
+sites (a CORS restriction), not a problem with your token or workbook.
+Tell whoever looks after this tool: it will need the small local helper
+version instead of the in-browser one."""
+
+async def run(path, token, send, limit, account):
+    rows, problems = load_rows(path)
+    say(f"{len(rows)} entries ready from the workbook.")
+    if problems:
+        say("\nCheck these before sending:")
+        for p in problems: say(f"  - {p}")
+    if not token:
+        say("\nPaste your TMetric token to check project names against TMetric and to send entries.")
+        return
+    api = TMetric(token)
+    try:
+        me = await api.user()
+        account_id = int(account) if account else me.get("activeAccountId")
+        user_id = me.get("id")
+        say(f"\nTMetric user {me.get('name', user_id)}, account {account_id}")
+        idx = project_lookup(await api.projects(account_id))
+    except BlockedByBrowser as ex:
+        say(BLOCKED_MSG); say(f"\n(details: {ex})"); return
+    except HttpError as ex:
+        say(f"\nTMetric refused the request: {ex}\nCheck that the token is correct and still active."); return
+
+    missing = sorted({r["project"] for r in rows if norm(r["project"]) not in idx})
+    if missing:
+        say("\nThese Sheet1 project names don't match any TMetric project. Fix Sheet1 to match exactly:")
+        for m in missing: say(f"  - {m}")
+        say("\nProjects TMetric returned:")
+        for pid, name in sorted(set(idx.values()), key=lambda x: x[1]):
+            say(f"  {pid}: {name}")
+        return
+
+    done = read_log()
+    todo = [r for r in rows if f"{r['start']:%Y%m%dT%H%M%S}" not in done]
+    already = len(rows) - len(todo)
+    if limit:
+        todo = todo[:limit]
+    say(f"\n{len(todo)} new entries to {'send' if send else 'preview'} ({already} already sent).")
+    sent = failed = 0
+    for r in todo:
+        pid, pname = idx[norm(r["project"])]
+        line = f"row {r['row']:>3}  {r['start']:%Y-%m-%d %H:%M} -> {r['end']:%Y-%m-%d %H:%M}  {pname[:40]:<40}  {r['note']}"
+        if not send:
+            say(f"[dry run] {line}"); continue
+        entry = {
+            "startTime": r["start"].strftime("%Y-%m-%dT%H:%M:%S"),
+            "endTime": r["end"].strftime("%Y-%m-%dT%H:%M:%S"),
+            "note": r["note"],
+            "project": {"id": pid},
+        }
+        try:
+            await api.create(account_id, user_id, entry)
+            done.add(f"{r['start']:%Y%m%dT%H%M%S}")
+            write_log(done)
+            sent += 1
+            say(f"[sent]    {line}")
+        except BlockedByBrowser as ex:
+            say(f"[FAILED]  {line}"); say(BLOCKED_MSG); return
+        except Exception as ex:
+            failed += 1
+            say(f"[FAILED]  {line}\n           {ex}")
+    if send:
+        say(f"\nDone: {sent} sent, {failed} failed.")
+    else:
+        say("\nDry run only. Press 'Send to TMetric' to create these.")
+`;
+
+let py = null, pyReady = false, busy = false;
+
+async function boot() {
+  try {
+    py = await loadPyodide();
+    $("status").textContent = "Installing spreadsheet reader…";
+    await py.loadPackage("micropip");
+    await py.runPythonAsync("import micropip\nawait micropip.install('openpyxl')");
+    await py.runPythonAsync(PY);
+    pyReady = true;
+    $("status").textContent = "Ready. Choose the workbook to begin.";
+    refresh();
+  } catch (e) {
+    $("status").textContent = "Could not load Python in this browser: " + e;
+  }
+}
+
+function refresh() {
+  $("template").disabled = !pyReady || busy;
+  const ready = pyReady && $("file").files.length && !busy;
+  $("check").disabled = !ready;
+  $("send").disabled = !ready || !$("token").value.trim();
+}
+$("file").addEventListener("change", refresh);
+$("token").addEventListener("input", refresh);
+
+async function go(send) {
+  busy = true; refresh(); out.textContent = "";
+  $("status").textContent = send ? "Sending…" : "Checking…";
+  try {
+    const buf = new Uint8Array(await $("file").files[0].arrayBuffer());
+    py.FS.writeFile("/tmp/wb.xlsx", buf);
+    py.globals.set("_tok", $("token").value.trim());
+    py.globals.set("_send", send);
+    py.globals.set("_limit", parseInt($("limit").value || "0", 10) || 0);
+    py.globals.set("_acct", $("account").value.trim());
+    await py.runPythonAsync("await run('/tmp/wb.xlsx', _tok, _send, _limit, _acct)");
+    $("status").textContent = "Finished.";
+  } catch (e) {
+    print("\nError: " + (e.message || e).toString().split("\n").slice(-2).join(" "));
+    $("status").textContent = "Stopped with an error.";
+  } finally {
+    busy = false; refresh();
+  }
+}
+$("check").addEventListener("click", () => go(false));
+$("send").addEventListener("click", () => go(true));
+
+$("template").addEventListener("click", async () => {
+  try {
+    const proxy = await py.runPythonAsync("make_template()");
+    const bytes = proxy.toJs(); proxy.destroy && proxy.destroy();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+    a.download = "tmetrics_template.xlsx";
+    a.click();
+    $("status").textContent = "Template downloaded.";
+  } catch (e) {
+    $("status").textContent = "Could not build the template: " + e;
+  }
+});
+
+$("exportLog").addEventListener("click", () => {
+  let data = "[]";
+  try { data = localStorage.getItem("tmetric_sent_log") || "[]"; } catch (e) {}
+  const text = JSON.parse(data).join("\n") + "\n";
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  a.download = "tmetric_sent.log";
+  a.click();
+});
+$("clearLog").addEventListener("click", () => {
+  try { localStorage.removeItem("tmetric_sent_log"); } catch (e) {}
+  print("Sent log cleared for this browser.");
+});
+
+boot();
+</script>
+</body>
+</html>
